@@ -11,9 +11,21 @@ import asyncio
 import sys
 from pathlib import Path
 
+# Direct invocation (`python voffice/cli.py`) leaves the project root off
+# sys.path. Insert it so `from voffice.engine import ...` resolves before
+# the package is pip-installed.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from colorama import Fore, Style, init as colorama_init
 
 from voffice.engine import Office, build_office, run_turn, ship_workspace
+
+# Windows consoles default to cp1252, which crashes on Vietnamese agent names
+# (Hà, Tú, Đ...) streamed by the model. Force UTF-8 before colorama wraps stdout.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 colorama_init()
 
