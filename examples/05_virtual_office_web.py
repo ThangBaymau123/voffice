@@ -6,11 +6,17 @@ Browser tự mở http://localhost:8000
 Thoát: Ctrl+C
 """
 
+import sys
 import threading
 import time
 import webbrowser
+from pathlib import Path
 
-import uvicorn
+# Đảm bảo project root nằm trong sys.path để uvicorn import được package `web`
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+import uvicorn  # noqa: E402
 
 
 def _open_browser_after_delay() -> None:
