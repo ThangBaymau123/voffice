@@ -12,8 +12,11 @@ API chính:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import shutil
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,17 +52,28 @@ NHIỆM VỤ THẬT (KHÔNG chỉ nói):
 - Khi Manager giao việc cho bạn, bạn PHẢI tạo file deliverable cụ thể
   bằng tool `save_deliverable(filename, content)`. Ví dụ:
     • PM → user_story.md, requirements.md
-    • Backend → api_spec.md, auth_handler.py
+    • Backend → api_spec.md, auth_handler.py (CODE PHẢI CHẠY ĐƯỢC,
+      tránh import lib lạ ngoài flask/sqlalchemy/pytest)
     • Frontend → mockup.html, components.md
-    • QA → test_plan.md, test_cases.md
+    • QA → test_plan.md, test_<module>.py (PYTEST file thực sự,
+      import code Backend bằng tên file, vd `from login_api import validate_email`)
 - Nội dung file phải dùng được luôn — không phải placeholder.
 - Sau khi save, trả lời ngắn xác nhận đã tạo file gì.
 
-KHI NÀO IM LẶNG:
-- Nếu Manager không nhắc bạn VÀ bạn không thấy lỗi kỹ thuật nghiêm trọng
-  → trả lời CHÍNH XÁC chuỗi: [skip]
-- Nếu thấy lỗi kỹ thuật trong cách Manager phân công → chen ngắn 1-2 câu
-  phản biện (không cần save file).
+QA LOOP (chỉ liên quan Minh & Tú):
+- Sau khi Backend save code + QA save test, hệ thống TỰ ĐỘNG chạy pytest.
+- Nếu fail → toàn bộ traceback sẽ được broadcast cho cả phòng.
+- Minh: ĐỌC traceback, sửa code, save lại CÙNG tên file (overwrite).
+- Tú: nếu thấy test mình viết sai → sửa test, save lại.
+- Loop tối đa 3 vòng.
+
+QUAN TRỌNG: BẠN PHẢI ACT, KHÔNG SKIP, NẾU TÊN BẠN XUẤT HIỆN TRONG TIN MANAGER.
+- Manager liệt kê tên bạn trong message (kể cả trong bullet list) = bạn ĐƯỢC GIAO VIỆC.
+- ĐƯỢC GIAO VIỆC → BẮT BUỘC gọi save_deliverable, không [skip].
+- Chỉ [skip] khi: Manager hoàn toàn không nhắc tên bạn VÀ bạn không có ý kiến phản biện.
+
+NẾU PHẢN BIỆN (không có deliverable):
+- Chen ngắn 1-2 câu chỉ ra lỗi kỹ thuật, không cần save file.
 
 Trả lời tiếng Việt, từ góc nhìn chuyên môn ({title}) của bạn.
 """
@@ -188,21 +202,75 @@ def build_office(workspace_dir: Path) -> Office:
     return office
 
 
-async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
-    """One conversation turn.
+MAX_VERIFY_ITERS = 3
+PYTEST_TIMEOUT_SEC = 60
 
-    1. Broadcast user message into hub.
-    2. Manager speaks (no tools).
-    3. Employees act in parallel — each may call `save_deliverable` 1+ times
-       (ReAct loop, max 4 iterations) before responding.
-    4. Yield events for non-[skip] replies. After all replies, yield a synthetic
-       "Office" event listing files saved this turn.
+
+async def _run_pytest_in(verify_dir: Path) -> tuple[bool, str]:
+    """Run pytest in verify_dir and return (passed, output)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pytest", "-x", "--tb=short", "-q",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(verify_dir),
+        )
+        stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=PYTEST_TIMEOUT_SEC)
+        output = stdout_bytes.decode("utf-8", errors="replace")
+        return proc.returncode == 0, output
+    except asyncio.TimeoutError:
+        return False, f"⏱️ pytest timed out after {PYTEST_TIMEOUT_SEC}s"
+
+
+def _gather_python_files(directory: Path, test_only: bool) -> list[Path]:
+    if not directory.exists():
+        return []
+    files = []
+    for p in directory.glob("*.py"):
+        is_test = p.name.startswith("test_") or p.name.endswith("_test.py")
+        if test_only == is_test:
+            files.append(p)
+    return files
+
+
+def _prepare_verify_dir(office: Office) -> Path | None:
+    """Copy Backend code + QA tests into a flat verify dir. Returns None if not applicable."""
+    backend_dir = office.workspace_dir / "Minh"
+    qa_dir = office.workspace_dir / "Tú"
+
+    code_files = _gather_python_files(backend_dir, test_only=False)
+    test_files = _gather_python_files(qa_dir, test_only=True)
+
+    if not code_files or not test_files:
+        return None
+
+    verify_dir = office.workspace_dir / ".verify"
+    if verify_dir.exists():
+        shutil.rmtree(verify_dir)
+    verify_dir.mkdir(parents=True)
+
+    for f in code_files + test_files:
+        shutil.copy2(f, verify_dir / f.name)
+    return verify_dir
+
+
+async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
+    """One conversation turn with optional QA verification loop.
+
+    Flow:
+      1. Broadcast user msg → Manager speaks → fanout(employees) writes files.
+      2. If both Backend(.py) and QA(test_*.py) produced code → enter QA loop:
+         - Run pytest deterministically in a sandbox dir.
+         - If fails: broadcast traceback, ask Backend to fix, copy new code, re-test.
+         - Stop on pass or MAX_VERIFY_ITERS reached.
+      3. Yield TurnEvent for each significant step.
     """
     participants = [office.manager, *office.employees]
     user_msg = Msg(name="User", content=user_text, role="user")
     office.turns_history.append(user_text)
 
     deliverables_before = len(office.deliverables)
+    backend = office.employees[1]  # Minh = index 1
 
     async with MsgHub(participants=participants, enable_auto_broadcast=True) as hub:
         office.hub = hub
@@ -226,6 +294,65 @@ async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
                 text_chunk=reply.get_text_content(),
                 is_final=True,
             )
+
+        # ─── QA VERIFICATION LOOP ───────────────────────────────────────
+        verify_dir = _prepare_verify_dir(office)
+        if verify_dir is not None:
+            yield TurnEvent(
+                speaker="Office",
+                text_chunk=f"🧪 Bắt đầu QA loop trong {verify_dir.name}/ ...",
+                is_final=True,
+            )
+
+            for iteration in range(1, MAX_VERIFY_ITERS + 1):
+                passed, output = await _run_pytest_in(verify_dir)
+                tail = output[-1500:]
+
+                if passed:
+                    yield TurnEvent(
+                        speaker="QA-Bot",
+                        text_chunk=f"✅ Tests pass (iter {iteration})\n{tail[-400:]}",
+                        is_final=True,
+                    )
+                    break
+
+                yield TurnEvent(
+                    speaker="QA-Bot",
+                    text_chunk=f"❌ Tests fail (iter {iteration}/{MAX_VERIFY_ITERS}):\n{tail}",
+                    is_final=True,
+                )
+
+                if iteration == MAX_VERIFY_ITERS:
+                    yield TurnEvent(
+                        speaker="Office",
+                        text_chunk=f"⚠️ Vẫn fail sau {MAX_VERIFY_ITERS} lần — dừng QA loop, cần can thiệp thủ công.",
+                        is_final=True,
+                    )
+                    break
+
+                # Broadcast lỗi vào hub → Minh thấy trong memory
+                err_msg = Msg(
+                    name="QA-Bot",
+                    content=(
+                        f"Pytest fail. Đây là output:\n{tail}\n\n"
+                        "Minh, sửa code và save lại CÙNG tên file. "
+                        "Tú, nếu test sai thì sửa test."
+                    ),
+                    role="user",
+                )
+                await hub.broadcast(err_msg)
+
+                fix_reply = await backend(None)
+                if fix_reply.get_text_content().strip() != "[skip]":
+                    yield TurnEvent(
+                        speaker=backend.name,
+                        text_chunk=fix_reply.get_text_content(),
+                        is_final=True,
+                    )
+
+                # Refresh verify_dir với code mới (overwrite các file .py không phải test)
+                for f in _gather_python_files(office.workspace_dir / "Minh", test_only=False):
+                    shutil.copy2(f, verify_dir / f.name)
 
     new_files = office.deliverables[deliverables_before:]
     if new_files:
