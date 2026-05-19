@@ -55,3 +55,33 @@ def test_turn_event_dataclass_shape():
     assert ev.speaker == "Lan"
     assert ev.text_chunk == "xin chào"
     assert ev.is_final is False
+
+
+from office_engine import Office, build_office
+
+
+def _set_full_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_AWS_API_KEY", "k0")
+    monkeypatch.setenv("ANTHROPIC_AWS_WORKSPACE_ID", "w0")
+    monkeypatch.setenv("ANTHROPIC_AWS_BASE_URL", "https://r0.example")
+    for i, prefix in enumerate(
+        ["MANAGER", "EMPLOYEE_1", "EMPLOYEE_2", "EMPLOYEE_3", "EMPLOYEE_4"], start=1
+    ):
+        monkeypatch.setenv(f"{prefix}_KEY", f"k{i}")
+        monkeypatch.setenv(f"{prefix}_WORKSPACE", f"w{i}")
+        monkeypatch.setenv(f"{prefix}_BASE_URL", f"https://r{i}.example")
+
+
+def test_build_office_creates_5_agents(monkeypatch):
+    _set_full_env(monkeypatch)
+    office = build_office()
+    assert isinstance(office, Office)
+    assert office.manager.name == "Manager"
+    assert [a.name for a in office.employees] == ["Lan", "Minh", "Hà", "Tú"]
+
+
+def test_build_office_missing_env_raises(monkeypatch):
+    _set_full_env(monkeypatch)
+    monkeypatch.delenv("EMPLOYEE_3_KEY")
+    with pytest.raises(KeyError, match="EMPLOYEE_3_KEY"):
+        build_office()
