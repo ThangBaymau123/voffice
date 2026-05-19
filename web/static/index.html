@@ -1,1 +1,35 @@
-<!DOCTYPE html><html><body>placeholder</body></html>
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Văn phòng ảo</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <aside id="roster">
+    <h1>Văn phòng</h1>
+    <ul id="roster-list"></ul>
+  </aside>
+
+  <main id="chat">
+    <header>
+      <h2>#general</h2>
+      <span id="conn-status" class="status offline">đang kết nối...</span>
+    </header>
+    <section id="feed" aria-live="polite"></section>
+    <form id="input-form">
+      <input
+        id="input"
+        type="text"
+        placeholder="Mô tả việc cần làm, ví dụ: 'Thiết kế API đăng nhập 2FA'..."
+        autocomplete="off"
+        autofocus
+      />
+      <button type="submit">Gửi</button>
+    </form>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
