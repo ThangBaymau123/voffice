@@ -289,15 +289,16 @@ async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
         await hub.broadcast(user_msg)
 
         manager_reply = await office.manager(None)
-        if manager_reply.get_text_content().strip() != "[skip]":
-            yield TurnEvent(office.manager.name, manager_reply.get_text_content(), True)
+        manager_text = (manager_reply.get_text_content() or "").strip()
+        if manager_text and manager_text != "[skip]":
+            yield TurnEvent(office.manager.name, manager_text, True)
 
         replies = await fanout_pipeline(office.employees)
         for reply in replies:
-            text = reply.get_text_content().strip()
-            if text == "[skip]":
+            text = (reply.get_text_content() or "").strip()
+            if not text or text == "[skip]":
                 continue
-            yield TurnEvent(reply.name, reply.get_text_content(), True)
+            yield TurnEvent(reply.name, text, True)
 
         verify_dir = _prepare_verify_dir(office)
         if verify_dir is not None:
@@ -333,8 +334,9 @@ async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
                 await hub.broadcast(err_msg)
 
                 fix_reply = await backend(None)
-                if fix_reply.get_text_content().strip() != "[skip]":
-                    yield TurnEvent(backend.name, fix_reply.get_text_content(), True)
+                fix_text = (fix_reply.get_text_content() or "").strip()
+                if fix_text and fix_text != "[skip]":
+                    yield TurnEvent(backend.name, fix_text, True)
 
                 for f in _gather_python_files(office.workspace_dir / "Minh", test_only=False):
                     shutil.copy2(f, verify_dir / f.name)
