@@ -1,5 +1,11 @@
+"""Tests for voffice — model factory, roles, build_office, run_turn filter."""
+
 import pytest
-from _common import make_model
+
+from voffice import make_model, ROLES, RoleSpec, TurnEvent, Office, build_office, run_turn
+
+
+# ─── make_model ────────────────────────────────────────────────────────────
 
 
 def test_make_model_uses_explicit_args(monkeypatch):
@@ -26,12 +32,11 @@ def test_make_model_falls_back_to_env(monkeypatch):
     assert model.client.default_headers.get("anthropic-workspace-id") == "fallback_ws"
 
 
-from office_engine import ROLES, RoleSpec, TurnEvent
+# ─── ROLES ─────────────────────────────────────────────────────────────────
 
 
 def test_roles_has_5_entries():
-    expected = {"Manager", "Lan", "Minh", "Hà", "Tú"}
-    assert set(ROLES.keys()) == expected
+    assert set(ROLES.keys()) == {"Manager", "Lan", "Minh", "Hà", "Tú"}
 
 
 def test_each_role_has_required_fields():
@@ -43,21 +48,20 @@ def test_each_role_has_required_fields():
 
 
 def test_employee_sys_prompts_contain_skip_rule():
-    employee_names = ["Lan", "Minh", "Hà", "Tú"]
-    for name in employee_names:
+    for name in ["Lan", "Minh", "Hà", "Tú"]:
         assert "[skip]" in ROLES[name].sys_prompt, (
             f"{name}'s sys_prompt must instruct to return [skip] when silent"
         )
 
 
 def test_turn_event_dataclass_shape():
-    ev = TurnEvent(speaker="Lan", text_chunk="xin chào", is_final=False)
+    ev = TurnEvent(speaker="Lan", text_chunk="hello", is_final=False)
     assert ev.speaker == "Lan"
-    assert ev.text_chunk == "xin chào"
+    assert ev.text_chunk == "hello"
     assert ev.is_final is False
 
 
-from office_engine import Office, build_office
+# ─── build_office ──────────────────────────────────────────────────────────
 
 
 def _set_full_env(monkeypatch):
@@ -88,25 +92,29 @@ def test_build_office_missing_env_raises(monkeypatch, tmp_path):
         build_office(tmp_path / "ws")
 
 
-from unittest.mock import AsyncMock, MagicMock
+# ─── run_turn ──────────────────────────────────────────────────────────────
+
+
+from unittest.mock import AsyncMock
 
 from agentscope.message import Msg
-from office_engine import run_turn
 
 
 async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch, tmp_path):
-    """Manager + 2 employees speak; 2 employees return [skip] and are filtered."""
-    from office_engine import Office
-    import office_engine as oe
+    """Manager + 2 employees speak; 2 employees return [skip] and are filtered.
+
+    We bypass MsgHub/fanout/QA-loop plumbing — focus on the filter & yield logic.
+    """
+    import voffice.engine as oe
 
     async def manager_call(msg=None):
-        return Msg(name="Manager", content="Lan, Minh — bắt tay vào việc.", role="assistant")
+        return Msg(name="Manager", content="Lan, Minh — get to work.", role="assistant")
 
     async def lan_call(msg=None):
-        return Msg(name="Lan", content="User story đã sẵn sàng.", role="assistant")
+        return Msg(name="Lan", content="User story drafted.", role="assistant")
 
     async def minh_call(msg=None):
-        return Msg(name="Minh", content="API design here.", role="assistant")
+        return Msg(name="Minh", content="API designed.", role="assistant")
 
     async def ha_call(msg=None):
         return Msg(name="Hà", content="[skip]", role="assistant")
@@ -141,7 +149,7 @@ async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch, tmp_path
     monkeypatch.setattr(oe, "fanout_pipeline", _stub_fanout)
 
     events = []
-    async for ev in run_turn(office, "Cần API đăng nhập"):
+    async for ev in run_turn(office, "Build a login API"):
         events.append(ev)
 
     speakers = [e.speaker for e in events]
@@ -150,8 +158,6 @@ async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch, tmp_path
     assert "Minh" in speakers
     assert "Hà" not in speakers, "[skip] should be filtered"
     assert "Tú" not in speakers, "[skip] should be filtered"
-    last_per_speaker = {}
     for ev in events:
-        last_per_speaker[ev.speaker] = ev
-    for ev in last_per_speaker.values():
-        assert ev.is_final, f"{ev.speaker}'s last event must be is_final=True"
+        if ev.speaker in {"Manager", "Lan", "Minh"}:
+            assert ev.is_final, f"{ev.speaker}'s event must be is_final=True"

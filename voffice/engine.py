@@ -1,13 +1,14 @@
-"""
-Văn phòng ảo — logic chung cho CLI và Web.
+"""Virtual office engine — orchestration of Manager + 4 employees.
 
-Kiến trúc: 1 Manager + 4 employees ngồi chung MsgHub (auto-broadcast).
-Mỗi nhân viên (không phải Manager) được trang bị tool `save_deliverable`
-để tạo file thật trong workspace_dir → "làm việc" chứ không chỉ "nói".
+Architecture: a single MsgHub broadcasts among 5 ReActAgents. Employees own
+a per-agent `save_deliverable` tool that writes files under
+workspace_dir/<Name>/. After each turn, an iterative pytest loop verifies the
+generated Python code against the generated tests.
 
-API chính:
-  build_office(workspace_dir) → Office
-  run_turn(office, user_text)  → async generator của TurnEvent
+Public API (re-exported by voffice/__init__.py):
+  build_office(workspace_dir) -> Office
+  run_turn(office, user_text)  -> async generator of TurnEvent
+  ship_workspace(office, name) -> ShipReport
 """
 
 from __future__ import annotations
@@ -16,9 +17,11 @@ import asyncio
 import os
 import re
 import shutil
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from agentscope.agent import ReActAgent
@@ -28,54 +31,79 @@ from agentscope.message import Msg, TextBlock
 from agentscope.pipeline import MsgHub, fanout_pipeline
 from agentscope.tool import Toolkit, ToolResponse, view_text_file
 
-from _common import make_model
+from voffice.model import make_model
+
+
+# ─── Data types ───────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
 class RoleSpec:
     title: str
     sys_prompt: str
-    env_prefix: str
+    env_prefix: str  # MANAGER → MANAGER_KEY / _WORKSPACE / _BASE_URL
 
 
 @dataclass
 class TurnEvent:
     speaker: str
-    text_chunk: str
+    text_chunk: str  # delta — NOT cumulative
     is_final: bool
 
 
+@dataclass
+class Office:
+    manager: ReActAgent
+    employees: list[ReActAgent]
+    workspace_dir: Path
+    deliverables: list[Path] = field(default_factory=list)
+    turns_history: list[str] = field(default_factory=list)
+    hub: MsgHub | None = None
+
+
+@dataclass
+class ShipReport:
+    project_dir: Path
+    files_copied: int
+    file_tree: list[str]
+    commit_sha: str
+
+
+# ─── Roles & system prompts ───────────────────────────────────────────────
+
+
 _EMPLOYEE_TEMPLATE = """\
-Bạn là {name}, {title} trong văn phòng phần mềm.
+You are {name}, the {title} of a software office.
 
-NHIỆM VỤ THẬT (KHÔNG chỉ nói):
-- Khi Manager giao việc cho bạn, bạn PHẢI tạo file deliverable cụ thể
-  bằng tool `save_deliverable(filename, content)`. Ví dụ:
-    • PM → user_story.md, requirements.md
-    • Backend → api_spec.md, auth_handler.py (CODE PHẢI CHẠY ĐƯỢC,
-      tránh import lib lạ ngoài flask/sqlalchemy/pytest)
+REAL WORK (NOT just talking):
+- When the Manager assigns you a task, you MUST create a real deliverable file
+  using the tool `save_deliverable(filename, content)`. Examples:
+    • PM       → user_story.md, requirements.md
+    • Backend  → api_spec.md, auth_handler.py (RUNNABLE code; avoid exotic
+                  imports outside flask/sqlalchemy/pytest)
     • Frontend → mockup.html, components.md
-    • QA → test_plan.md, test_<module>.py (PYTEST file thực sự,
-      import code Backend bằng tên file, vd `from login_api import validate_email`)
-- Nội dung file phải dùng được luôn — không phải placeholder.
-- Sau khi save, trả lời ngắn xác nhận đã tạo file gì.
+    • QA       → test_plan.md, test_<module>.py (real pytest, importing the
+                 Backend file by name, e.g. `from login_api import validate_email`)
+- File content must be usable, not placeholder.
+- After saving, reply briefly confirming what file you created.
 
-QA LOOP (chỉ liên quan Minh & Tú):
-- Sau khi Backend save code + QA save test, hệ thống TỰ ĐỘNG chạy pytest.
-- Nếu fail → toàn bộ traceback sẽ được broadcast cho cả phòng.
-- Minh: ĐỌC traceback, sửa code, save lại CÙNG tên file (overwrite).
-- Tú: nếu thấy test mình viết sai → sửa test, save lại.
-- Loop tối đa 3 vòng.
+QA LOOP (relevant to Backend & QA):
+- After Backend saves code + QA saves tests, the system AUTOMATICALLY runs pytest.
+- If it fails, the full traceback is broadcast to everyone.
+- Backend: READ the traceback, fix the code, save again WITH THE SAME filename
+  (overwrite).
+- QA: if your test was wrong, fix it and save again.
+- The loop runs up to 3 iterations.
 
-QUAN TRỌNG: BẠN PHẢI ACT, KHÔNG SKIP, NẾU TÊN BẠN XUẤT HIỆN TRONG TIN MANAGER.
-- Manager liệt kê tên bạn trong message (kể cả trong bullet list) = bạn ĐƯỢC GIAO VIỆC.
-- ĐƯỢC GIAO VIỆC → BẮT BUỘC gọi save_deliverable, không [skip].
-- Chỉ [skip] khi: Manager hoàn toàn không nhắc tên bạn VÀ bạn không có ý kiến phản biện.
+IMPORTANT: YOU MUST ACT, NOT SKIP, IF YOUR NAME APPEARS IN THE MANAGER'S MESSAGE.
+- Manager listing your name (even in a bullet list) = you are assigned.
+- Assigned → you MUST call save_deliverable, never [skip].
+- Only [skip] if: Manager did NOT mention you at all AND you have no critique.
 
-NẾU PHẢN BIỆN (không có deliverable):
-- Chen ngắn 1-2 câu chỉ ra lỗi kỹ thuật, không cần save file.
+IF CRITIQUING (no deliverable):
+- Inject a short 1-2 sentence technical objection; no need to save anything.
 
-Trả lời tiếng Việt, từ góc nhìn chuyên môn ({title}) của bạn.
+Reply in the user's language, from your professional perspective as a {title}.
 """
 
 
@@ -91,15 +119,15 @@ ROLES: dict[str, RoleSpec] = {
     "Manager": RoleSpec(
         title="Manager",
         sys_prompt=(
-            "Bạn là Manager của một văn phòng phần mềm 4 người: "
+            "You are the Manager of a 4-person software office: "
             "Lan (PM), Minh (Backend), Hà (Frontend), Tú (QA). "
-            "Khi user đăng việc:\n"
-            "  1. Phân tích yêu cầu.\n"
-            "  2. Giao việc CỤ THỂ cho từng người liên quan, gọi đích danh.\n"
-            "     Yêu cầu họ TẠO FILE DELIVERABLE (Lan→user_story.md, "
-            "Minh→api code, Hà→mockup, Tú→test_plan.md...).\n"
-            "  3. Không tự làm thay — chỉ điều phối.\n"
-            "Trả lời ngắn (2-5 câu), tiếng Việt."
+            "When the user posts a task:\n"
+            "  1. Analyze the request.\n"
+            "  2. Assign SPECIFIC work to each relevant person, naming them.\n"
+            "     Tell them to CREATE A DELIVERABLE FILE (Lan→user_story.md, "
+            "Minh→api code, Hà→mockup, Tú→test_plan.md or test_*.py...).\n"
+            "  3. Do not do the work yourself — only coordinate.\n"
+            "Reply briefly (2-5 sentences), in the user's language."
         ),
         env_prefix="MANAGER",
     ),
@@ -110,40 +138,28 @@ ROLES: dict[str, RoleSpec] = {
 }
 
 
-@dataclass
-class Office:
-    manager: ReActAgent
-    employees: list[ReActAgent]
-    workspace_dir: Path
-    deliverables: list[Path] = field(default_factory=list)
-    turns_history: list[str] = field(default_factory=list)  # các prompt user đã gõ
-    hub: MsgHub | None = None
+# ─── Per-agent save tool ──────────────────────────────────────────────────
 
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.\-]")
 
 
 def _sanitize_filename(name: str) -> str:
-    """Strip path traversal, normalize separators."""
     base = Path(name).name  # drops any directory part
     return _SAFE_NAME.sub("_", base) or "untitled.txt"
 
 
 def _make_save_tool(agent_name: str, office: Office):
-    """Return a per-agent save_deliverable function bound to office.workspace_dir.
-
-    Each call writes to workspace_dir/<agent_name>/<filename> and records the
-    path in office.deliverables so the UI can list them.
-    """
+    """Bind a save_deliverable function to (agent_name, office)."""
     def save_deliverable(filename: str, content: str) -> ToolResponse:
-        """Lưu một file deliverable thật vào workspace.
+        """Save a real deliverable file into the workspace.
 
-        Dùng tool này MỖI KHI bạn được Manager giao việc cụ thể.
-        Trả về xác nhận đường dẫn file đã ghi.
+        Call this whenever the Manager assigns you a concrete task.
+        Returns confirmation of the absolute path written.
 
         Args:
-            filename: Tên file (không có path), ví dụ "user_story.md", "auth.py".
-            content: Toàn bộ nội dung file (markdown, code, bất cứ gì).
+            filename: file name only (no path), e.g. "user_story.md", "auth.py".
+            content: full file contents (markdown, code, anything).
         """
         safe = _sanitize_filename(filename)
         out_dir = office.workspace_dir / agent_name
@@ -152,10 +168,13 @@ def _make_save_tool(agent_name: str, office: Office):
         path.write_text(content, encoding="utf-8")
         office.deliverables.append(path)
         return ToolResponse(
-            content=[TextBlock(type="text", text=f"✓ Đã lưu: {path}")],
+            content=[TextBlock(type="text", text=f"✓ Saved: {path}")],
         )
     save_deliverable.__name__ = "save_deliverable"
     return save_deliverable
+
+
+# ─── Build & run ──────────────────────────────────────────────────────────
 
 
 def _agent_from_role(
@@ -180,16 +199,15 @@ def _agent_from_role(
 
 
 def build_office(workspace_dir: Path) -> Office:
-    """Dựng văn phòng. Manager không có tool; mỗi employee có save_deliverable."""
+    """Build the office. Manager has no tools; each employee has save_deliverable + view_text_file."""
     workspace_dir = Path(workspace_dir).resolve()
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     office = Office(
-        manager=None,  # type: ignore[arg-type] — set ngay dưới
+        manager=None,  # type: ignore[arg-type] — assigned just below
         employees=[],
         workspace_dir=workspace_dir,
     )
-
     office.manager = _agent_from_role("Manager", ROLES["Manager"], max_iters=1)
 
     for name in ["Lan", "Minh", "Hà", "Tú"]:
@@ -200,6 +218,9 @@ def build_office(workspace_dir: Path) -> Office:
         office.employees.append(agent)
 
     return office
+
+
+# ─── Pytest verification loop ─────────────────────────────────────────────
 
 
 MAX_VERIFY_ITERS = 3
@@ -234,7 +255,7 @@ def _gather_python_files(directory: Path, test_only: bool) -> list[Path]:
 
 
 def _prepare_verify_dir(office: Office) -> Path | None:
-    """Copy Backend code + QA tests into a flat verify dir. Returns None if not applicable."""
+    """Copy Backend code + QA tests into a flat verify dir, or None if N/A."""
     backend_dir = office.workspace_dir / "Minh"
     qa_dir = office.workspace_dir / "Tú"
 
@@ -255,16 +276,7 @@ def _prepare_verify_dir(office: Office) -> Path | None:
 
 
 async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
-    """One conversation turn with optional QA verification loop.
-
-    Flow:
-      1. Broadcast user msg → Manager speaks → fanout(employees) writes files.
-      2. If both Backend(.py) and QA(test_*.py) produced code → enter QA loop:
-         - Run pytest deterministically in a sandbox dir.
-         - If fails: broadcast traceback, ask Backend to fix, copy new code, re-test.
-         - Stop on pass or MAX_VERIFY_ITERS reached.
-      3. Yield TurnEvent for each significant step.
-    """
+    """One conversation turn with optional QA verification loop."""
     participants = [office.manager, *office.employees]
     user_msg = Msg(name="User", content=user_text, role="user")
     office.turns_history.append(user_text)
@@ -278,65 +290,43 @@ async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
 
         manager_reply = await office.manager(None)
         if manager_reply.get_text_content().strip() != "[skip]":
-            yield TurnEvent(
-                speaker=office.manager.name,
-                text_chunk=manager_reply.get_text_content(),
-                is_final=True,
-            )
+            yield TurnEvent(office.manager.name, manager_reply.get_text_content(), True)
 
         replies = await fanout_pipeline(office.employees)
         for reply in replies:
             text = reply.get_text_content().strip()
             if text == "[skip]":
                 continue
-            yield TurnEvent(
-                speaker=reply.name,
-                text_chunk=reply.get_text_content(),
-                is_final=True,
-            )
+            yield TurnEvent(reply.name, reply.get_text_content(), True)
 
-        # ─── QA VERIFICATION LOOP ───────────────────────────────────────
         verify_dir = _prepare_verify_dir(office)
         if verify_dir is not None:
-            yield TurnEvent(
-                speaker="Office",
-                text_chunk=f"🧪 Bắt đầu QA loop trong {verify_dir.name}/ ...",
-                is_final=True,
-            )
+            yield TurnEvent("Office", f"🧪 Starting QA loop in {verify_dir.name}/ ...", True)
 
             for iteration in range(1, MAX_VERIFY_ITERS + 1):
                 passed, output = await _run_pytest_in(verify_dir)
                 tail = output[-1500:]
 
                 if passed:
-                    yield TurnEvent(
-                        speaker="QA-Bot",
-                        text_chunk=f"✅ Tests pass (iter {iteration})\n{tail[-400:]}",
-                        is_final=True,
-                    )
+                    yield TurnEvent("QA-Bot", f"✅ Tests pass (iter {iteration})\n{tail[-400:]}", True)
                     break
 
-                yield TurnEvent(
-                    speaker="QA-Bot",
-                    text_chunk=f"❌ Tests fail (iter {iteration}/{MAX_VERIFY_ITERS}):\n{tail}",
-                    is_final=True,
-                )
+                yield TurnEvent("QA-Bot", f"❌ Tests fail (iter {iteration}/{MAX_VERIFY_ITERS}):\n{tail}", True)
 
                 if iteration == MAX_VERIFY_ITERS:
                     yield TurnEvent(
-                        speaker="Office",
-                        text_chunk=f"⚠️ Vẫn fail sau {MAX_VERIFY_ITERS} lần — dừng QA loop, cần can thiệp thủ công.",
-                        is_final=True,
+                        "Office",
+                        f"⚠️ Still failing after {MAX_VERIFY_ITERS} iterations — manual intervention required.",
+                        True,
                     )
                     break
 
-                # Broadcast lỗi vào hub → Minh thấy trong memory
                 err_msg = Msg(
                     name="QA-Bot",
                     content=(
-                        f"Pytest fail. Đây là output:\n{tail}\n\n"
-                        "Minh, sửa code và save lại CÙNG tên file. "
-                        "Tú, nếu test sai thì sửa test."
+                        f"Pytest failed. Output:\n{tail}\n\n"
+                        "Minh, fix the code and save again WITH THE SAME filename. "
+                        "Tú, if the test is wrong, fix the test."
                     ),
                     role="user",
                 )
@@ -344,33 +334,20 @@ async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
 
                 fix_reply = await backend(None)
                 if fix_reply.get_text_content().strip() != "[skip]":
-                    yield TurnEvent(
-                        speaker=backend.name,
-                        text_chunk=fix_reply.get_text_content(),
-                        is_final=True,
-                    )
+                    yield TurnEvent(backend.name, fix_reply.get_text_content(), True)
 
-                # Refresh verify_dir với code mới (overwrite các file .py không phải test)
                 for f in _gather_python_files(office.workspace_dir / "Minh", test_only=False):
                     shutil.copy2(f, verify_dir / f.name)
 
     new_files = office.deliverables[deliverables_before:]
     if new_files:
         listing = "\n".join(f"  • {p.relative_to(office.workspace_dir)}" for p in new_files)
-        yield TurnEvent(
-            speaker="Office",
-            text_chunk=f"📁 Deliverable đã tạo:\n{listing}",
-            is_final=True,
-        )
+        yield TurnEvent("Office", f"📁 Deliverables created:\n{listing}", True)
 
 
 # ─── Ship: consolidate workspace into a runnable git project ──────────────
 
-import shutil
-import subprocess
-from datetime import datetime
 
-# Bản đồ phần mở rộng file → thư mục đích trong project
 _LAYOUT: dict[str, str] = {
     ".md":   "docs",
     ".txt":  "docs",
@@ -395,14 +372,6 @@ _LAYOUT: dict[str, str] = {
 }
 
 
-@dataclass
-class ShipReport:
-    project_dir: Path
-    files_copied: int
-    file_tree: list[str]
-    commit_sha: str
-
-
 def _route_file(ext: str) -> str:
     return _LAYOUT.get(ext.lower(), "misc")
 
@@ -416,39 +385,36 @@ def _generate_readme(project_dir: Path, project_name: str, history: list[str], f
     by_dir: dict[str, list[str]] = {}
     for f in files:
         rel = f.relative_to(project_dir)
-        # POSIX-style slashes cho README — đẹp & portable
-        rel_str = rel.as_posix()
-        by_dir.setdefault(rel.parts[0], []).append(rel_str)
+        by_dir.setdefault(rel.parts[0], []).append(rel.as_posix())
 
     sections = []
     for d, paths in sorted(by_dir.items()):
         lines = "\n".join(f"- `{p}`" for p in sorted(paths))
         sections.append(f"### `{d}/`\n{lines}")
 
-    history_section = "\n".join(f"{i+1}. {h}" for i, h in enumerate(history)) or "_(không có)_"
+    history_section = "\n".join(f"{i+1}. {h}" for i, h in enumerate(history)) or "_(none)_"
 
     content = f"""# {project_name}
 
-> Generated by **Virtual Office** on {datetime.now().strftime("%Y-%m-%d %H:%M")}
+> Generated by **voffice** (Virtual Office) on {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
-## Yêu cầu ban đầu (user prompts)
+## Original prompts
 {history_section}
 
-## Cấu trúc
+## Structure
 
 {chr(10).join(sections) if sections else "_(empty)_"}
 
-## Cách chạy
+## How to run
 
-> ⚠️ Đây là code sinh tự động — có thể cần điều chỉnh trước khi chạy production.
+> ⚠️ This is auto-generated code — may need tweaks before production.
 
 - **Backend (Python):** `cd backend && pip install -r requirements.txt && python <file>.py`
-- **Frontend:** mở `frontend/*.html` trong browser, hoặc bundle bằng vite/webpack.
-- **Tests:** xem `docs/*test*.md` cho kế hoạch test thủ công.
+- **Frontend:** open `frontend/*.html` in a browser, or bundle with vite/webpack.
+- **Tests:** see `docs/*test*.md` for the manual test plan.
 
-## Nguồn gốc
-Sinh ra bởi Văn phòng ảo AgentScope. Xem:
-- https://github.com/agentscope-ai/agentscope
+## Provenance
+Generated by https://github.com/your-user/voffice
 """
     (project_dir / "README.md").write_text(content, encoding="utf-8")
 
@@ -468,25 +434,11 @@ def _run_git(args: list[str], cwd: Path) -> str:
 
 
 def ship_workspace(office: Office, project_name: str) -> ShipReport:
-    """Gom toàn bộ deliverable trong workspace → project có layout chuẩn, git init + commit local.
-
-    Mapping:
-      .py        → backend/
-      .html/.css/.js/.jsx/.ts/.tsx → frontend/
-      .md/.txt   → docs/
-      .sql       → backend/db/
-      .json/.yml → config/
-      .fig/.svg/.png → design/
-      others     → misc/
-
-    Project được tạo tại workspace_dir.parent / "projects" / <slug>.
-    Trả về ShipReport gồm path, số file, cây file, commit SHA.
-    """
+    """Consolidate every deliverable in workspace → standard project + git init + commit local."""
     slug = _slugify(project_name)
     projects_root = office.workspace_dir.parent / "projects"
     project_dir = projects_root / slug
     if project_dir.exists():
-        # nếu trùng tên, append timestamp
         project_dir = projects_root / f"{slug}-{datetime.now().strftime('%H%M%S')}"
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -506,14 +458,14 @@ def ship_workspace(office: Office, project_name: str) -> ShipReport:
     _generate_readme(project_dir, project_name, office.turns_history, copied)
     _generate_gitignore(project_dir)
 
-    # Git init + commit
     _run_git(["init", "-b", "main"], cwd=project_dir)
     _run_git(["config", "user.name", "Virtual Office"], cwd=project_dir)
     _run_git(["config", "user.email", "office@local"], cwd=project_dir)
     _run_git(["add", "-A"], cwd=project_dir)
     _run_git(
-        ["commit", "-m", f"Initial commit: {project_name}\n\n"
-                          f"Generated by Virtual Office from {len(office.turns_history)} turn(s)."],
+        ["commit", "-m",
+         f"Initial commit: {project_name}\n\n"
+         f"Generated by voffice from {len(office.turns_history)} turn(s)."],
         cwd=project_dir,
     )
     sha = _run_git(["rev-parse", "--short", "HEAD"], cwd=project_dir)

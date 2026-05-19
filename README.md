@@ -1,128 +1,219 @@
-# Học AgentScope — Dự án thực hành
+# 🏢 voffice — Virtual Office
 
-AgentScope (Alibaba Tongyi Lab) là framework Python để xây dựng ứng dụng **đa
-tác tử (multi-agent)** trên nền LLM. Dự án này là 3 ví dụ tăng dần độ phức tạp,
-giúp bạn nắm được toàn bộ kiến trúc.
+> **One prompt → a runnable git project.**
+> A multi-agent virtual software team (Manager + PM + Backend + Frontend + QA) that produces real files, runs `pytest` to verify, and packages the result as a git repo.
 
-## Kiến trúc 4 khối Lego
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Built on AgentScope](https://img.shields.io/badge/built%20on-AgentScope-orange.svg)](https://github.com/agentscope-ai/agentscope)
 
-Mọi agent trong AgentScope đều được lắp từ 4 thành phần độc lập:
+🇻🇳 **Tiếng Việt:** [README.vi.md](README.vi.md)
 
-| Thành phần | Vai trò | Ví dụ class |
+---
+
+## Why this exists
+
+Most multi-agent frameworks output **conversations**. voffice outputs **artifacts**: a directory of working files plus a git history. You can `cd` into the result and `python backend/server.py`.
+
+```
+> Build a BMI calculator module with Python + pytest
+
+[Manager] Lan, write user story. Minh, implement bmi.py. Tú, write test_bmi.py.
+[Minh]    ✓ Saved: workspace/Minh/bmi.py
+[Tú]      ✓ Saved: workspace/Tú/test_bmi.py
+[Office]  🧪 Starting QA loop...
+[QA-Bot]  ✅ Tests pass (iter 1) — 15 passed in 0.03s
+
+> /ship bmi-calculator
+✓ Shipped → projects/bmi-calculator
+  4 files copied, commit a3f9c12
+    .gitignore
+    README.md
+    backend/bmi.py
+    docs/test_bmi.py  ← wait, tests go to docs? no — to backend/
+```
+
+## Killer features
+
+| | Most agent frameworks | **voffice** |
 |---|---|---|
-| **Model** | Gọi LLM (OpenAI/Claude/Qwen/Ollama). | `AnthropicChatModel`, `DashScopeChatModel` |
-| **Formatter** | Chuyển danh sách `Msg` → định dạng provider hiểu. | `AnthropicChatFormatter`, `AnthropicMultiAgentFormatter` |
-| **Memory** | Lưu lịch sử hội thoại (ngắn/dài hạn). | `InMemoryMemory`, `Mem0LongTermMemory` |
-| **Toolkit** | Bộ công cụ agent có thể gọi (function calling). | `Toolkit`, `ToolResponse` |
+| Output | text conversation | **runnable git repo** |
+| Verification | none | **iterative pytest loop** (auto-fix on fail) |
+| Multi-agent UI | none | **Slack-style web UI** + CLI |
+| Packaging | manual | **`/ship <name>`** → git init + commit |
+| Tool-use safety | full subprocess | **sandboxed file writes per agent** |
 
-`ReActAgent` ráp 4 thứ trên thành vòng lặp **Reason → Act → Observe**:
-1. Reason: gọi LLM với memory + tool schema.
-2. Act: nếu LLM yêu cầu gọi tool, framework gọi tool.
-3. Observe: kết quả tool đi vào memory rồi lặp lại.
-4. Dừng khi LLM không gọi tool nữa, hoặc đạt `max_iters`.
+## Architecture
 
-## Cấu hình
-
-Project này dùng **Anthropic Claude qua AWS gateway**. Biến môi trường nằm trong
-`.env` (đã `.gitignore`):
-
-```env
-ANTHROPIC_AWS_API_KEY=...
-ANTHROPIC_AWS_WORKSPACE_ID=...
-ANTHROPIC_AWS_BASE_URL=https://aws-external-anthropic.ap-south-1.api.aws
+```
+┌─────────────────────────────────────────────────────────┐
+│              You type a task in CLI or Web UI           │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+         ┌───────────────────────────────┐
+         │   MsgHub (auto-broadcast)     │
+         │  ┌─────────────────────────┐  │
+         │  │   Manager (coordinator) │  │
+         │  ├─────────────────────────┤  │
+         │  │ Lan (PM)  │ Minh (BE)   │  │
+         │  │ Hà (FE)   │ Tú (QA)     │  │
+         │  └─────────────────────────┘  │
+         └────────────┬──────────────────┘
+                      │ fanout — each writes files via
+                      │ save_deliverable(filename, content)
+                      ▼
+              ┌───────────────────┐
+              │  workspace/       │
+              │   ├─ Lan/         │
+              │   ├─ Minh/        │
+              │   ├─ Hà/          │
+              │   └─ Tú/          │
+              └─────────┬─────────┘
+                        │
+                        ▼  (if .py + test_*.py exist)
+              ┌───────────────────┐
+              │  .verify/         │  ←─┐ Python deterministic
+              │   $ pytest -x     │    │ subprocess.
+              └───────────┬───────┘    │ Loop ≤ 3 iters:
+                          │            │ ❌ fail → broadcast
+                          ▼            │ Minh fixes → re-test
+                       ✅ pass ────────┘
+                          │
+                          ▼  (when you type /ship <name>)
+              ┌───────────────────┐
+              │  projects/<name>/ │
+              │   ├─ backend/     │   ← .py routed here
+              │   ├─ frontend/    │   ← .html/.css/.js
+              │   ├─ docs/        │   ← .md
+              │   ├─ README.md    │   (auto-generated)
+              │   └─ .git/        │   (commit ready)
+              └───────────────────┘
 ```
 
-File `examples/_common.py` chứa hàm `make_model()` — nó truyền `base_url` và
-header `anthropic-workspace-id` xuống `anthropic.AsyncAnthropic` qua tham số
-`client_kwargs` của `AnthropicChatModel`. Đây là pattern chính thức để dùng
-AgentScope với gateway tự host.
-
-## Cài đặt
+## Quick start
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/your-user/voffice
+cd voffice
+pip install -e .
+
+# Set up env (one API key per "employee"):
+cp .env.example .env
+$EDITOR .env
+
+# CLI
+voffice
+
+# OR Web UI (http://localhost:8000)
+voffice web
 ```
 
-## Chạy từng ví dụ
+You need **5 Anthropic API keys** (one per agent role). Why? Each agent has its own quota, latency, and "personality" via separate workspace. You can point all five at the same key for testing — the code splits them per `MANAGER_KEY`, `EMPLOYEE_1_KEY`, etc.
 
-```bash
-# Windows PowerShell — đảm bảo console hỗ trợ UTF-8
-$env:PYTHONIOENCODING="utf-8"
+`.env` shape — see [`.env.example`](.env.example).
 
-python examples/01_hello_agent.py        # ReActAgent + 2 tool built-in
-python examples/02_custom_tool.py        # Tự viết tool — bạn cần hoàn thiện!
-python examples/03_multi_agent_debate.py # 3 agent tranh luận qua MsgHub
-```
+## Usage
 
-## Lộ trình học đề xuất
+### CLI commands
 
-### 1️⃣ `01_hello_agent.py` — Khởi động
-- Chạy thử, gõ "Tính 17 * 23 giúp tôi" → quan sát agent gọi `execute_python_code`.
-- Đọc code, xác định từng dòng tương ứng với khối Lego nào.
-
-### 2️⃣ `02_custom_tool.py` — **Phần bạn code**
-File có `TODO` lớn ở giữa: tự viết hàm `track_expense(amount, category, note)`.
-Đây là chỗ thiết kế thực sự xảy ra — không phải boilerplate:
-
-- **Validate hay không?** `amount > 0` báo lỗi cứng vs cho qua. An toàn vs linh hoạt.
-- **Chuẩn hoá category?** `.lower().strip()` giúp gộp "Cafe" với "cafe". Đánh đổi: mất dấu vết người dùng gõ gốc.
-- **Timestamp?** Có thêm `datetime.now().isoformat()` không?
-- **Docstring**: LLM đọc docstring để biết khi nào gọi. Càng rõ, agent càng dùng đúng.
-
-Sau khi hoàn thiện, chạy lại và thử:
-> "Hôm nay tôi tiêu 50k cho cà phê và 200k tiền ăn trưa"
->
-> "Tổng cộng tôi đã chi bao nhiêu cho cà phê?"
-
-### 3️⃣ `03_multi_agent_debate.py` — Multi-agent
-- `MsgHub` là kênh broadcast: mỗi reply của agent A tự động vào memory của B và C.
-- `sequential_pipeline([a, b, c])` — phát biểu lần lượt.
-- `fanout_pipeline([a, b, c])` — phát biểu song song qua `asyncio.gather` nội bộ.
-- Thử `enable_auto_broadcast=False` để xem điều gì xảy ra (agent quên nhau).
-
-## Bước tiếp theo (gợi ý mở rộng)
-
-| Hướng | Class/Module liên quan |
+| Command | What it does |
 |---|---|
-| Bộ nhớ dài hạn (vector DB) | `Mem0LongTermMemory` |
-| MCP server tools | `HttpStatelessClient` trong `agentscope.mcp` |
-| Streaming token-by-token | đã bật sẵn (`stream=True`); chỉ cần in từng chunk |
-| Workflow phức tạp (rẽ nhánh) | `agentscope.pipeline` các pattern `if_else`, `for_loop` |
-| Đánh giá agent | `agentscope.evaluate` |
+| (any text) | Send a task to the office |
+| `/ship <name>` | Consolidate workspace into `projects/<name>/` with git init + commit |
+| `exit` / `quit` | Leave the office |
 
-## Ví dụ 4 & 5 — Văn phòng ảo
+### Programmatic API
 
-Phòng chat đa-agent: 1 Manager phân việc cho 4 nhân viên (PM, Backend, Frontend, QA).
-Tất cả ở chung "open office" (MsgHub), có thể chen phản biện chéo.
+```python
+import asyncio
+from pathlib import Path
+from voffice import build_office, run_turn, ship_workspace
 
-### Cấu hình
-Sao chép `.env.example` → `.env`, điền 5 nhóm key (xem comment trong file).
+async def main():
+    office = build_office(Path("./workspace"))
+    async for event in run_turn(office, "Build a TODO REST API with Flask + SQLite"):
+        print(f"[{event.speaker}] {event.text_chunk}")
 
-### Chạy CLI (Ví dụ 4)
-```powershell
-$env:PYTHONIOENCODING="utf-8"
-python examples/04_virtual_office_cli.py
+    report = ship_workspace(office, "todo-api")
+    print(f"Git repo ready at {report.project_dir}, commit {report.commit_sha}")
+
+asyncio.run(main())
 ```
 
-### Chạy Web UI (Ví dụ 5)
-```powershell
-python examples/05_virtual_office_web.py
+## How the QA loop works
+
+The trickiest piece — and the most important for trust:
+
+1. After fanout, voffice scans `workspace/Minh/*.py` (code) and `workspace/Tú/test_*.py` (tests).
+2. If both exist, it copies them flat into `workspace/.verify/`.
+3. It runs `python -m pytest -x --tb=short` in that directory **as a subprocess** (not via LLM tool calls — fully deterministic).
+4. If pytest fails: voffice broadcasts the traceback into the hub. The Backend agent reads its memory, sees the failure, and saves a fixed version.
+5. New code is re-copied to `.verify/` and pytest re-runs.
+6. Loop until pass or `MAX_VERIFY_ITERS=3`.
+
+LLMs do creative work (code, tests). Plain Python does verification. The combo is cheap and reliable.
+
+## Project structure
+
 ```
-Trình duyệt sẽ tự mở http://localhost:8000. UI dark theme, sidebar trái liệt kê
-5 thành viên, feed chính ở giữa, ô nhập ở dưới. Mỗi tab browser là 1 phiên
-văn phòng độc lập (không chia sẻ memory).
-
-### Test thủ công
-Xem `docs/superpowers/specs/2026-05-20-virtual-office-design.md` Section 9
-cho danh sách 10 scenario.
-
-### Test tự động
-```bash
-pytest tests/test_office_engine.py -v
+voffice/
+├── voffice/
+│   ├── __init__.py       # public API
+│   ├── model.py          # Anthropic model factory (AWS gateway or direct)
+│   ├── engine.py         # roles, build_office, run_turn, ship_workspace, QA loop
+│   ├── cli.py            # `voffice` CLI command
+│   ├── server.py         # FastAPI + WebSocket
+│   ├── launcher.py       # `voffice web` uvicorn launcher
+│   └── static/           # index.html, style.css, app.js (dark Slack-style UI)
+├── tests/                # pytest — model, roles, build_office, run_turn filter
+├── examples/             # demo scripts using raw AgentScope (no voffice import)
+├── docs/                 # design spec + implementation plan (in Vietnamese)
+├── pyproject.toml
+└── LICENSE
 ```
 
-## Tham khảo
+## Comparison with similar projects
 
-- Docs: <https://doc.agentscope.io>
-- GitHub: <https://github.com/agentscope-ai/agentscope>
-- Phiên bản đang dùng: **1.0.20**
+| | [CrewAI](https://github.com/joaomdmoura/crewAI) | [AutoGen](https://github.com/microsoft/autogen) | [MetaGPT](https://github.com/geekan/MetaGPT) | **voffice** |
+|---|---|---|---|---|
+| Type | Framework | Framework | Product | **Product** |
+| Output format | Strings | Strings | Files | **Files + git history** |
+| Auto verification | ❌ | partial | partial | **✅ pytest loop** |
+| Web UI included | ❌ | ❌ | CLI only | **✅ Slack-like** |
+| Lines of code | ~10k | ~30k | ~20k | **~700** |
+| One-prompt-to-repo | ❌ | ❌ | partial | **✅** |
+
+(See [docs/](docs/) for design notes.)
+
+## Security notes
+
+- **Subprocess pytest** runs untrusted code generated by an LLM. We restrict to a `.verify/` directory but the code can still call `os.system`, `requests.get(...)`, etc. **Do not run on an unsegmented production machine.** For untrusted use, run inside Docker / a sandboxed VM.
+- The `save_deliverable` tool sanitizes filenames (no path traversal) and routes to per-agent subdirs.
+- API keys come from `.env`; rotate any key you've shared in chat logs.
+
+## Roadmap
+
+- [x] Iterative pytest QA loop
+- [x] `/ship` → git project with layout
+- [x] CLI + Slack-style Web UI
+- [ ] **PyPI** package — `pipx install voffice`
+- [ ] **Office packs** — content team, research team, indie-game team (community PRs welcome)
+- [ ] **`/deploy`** — auto Vercel / Fly / GitHub
+- [ ] **Ollama** fallback for keyless local mode
+- [ ] **Token cost meter** per turn
+
+## Contributing
+
+PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The fastest way to help: open `voffice/engine.py`, find `ROLES`, add a new office pack (e.g., `ROLES_CONTENT_OFFICE`), and submit a PR.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Acknowledgments
+
+- Built on [AgentScope](https://github.com/agentscope-ai/agentscope) (Alibaba Tongyi Lab).
+- Uses [Anthropic Claude](https://www.anthropic.com/claude) — feels like having a senior eng pair-program with you.

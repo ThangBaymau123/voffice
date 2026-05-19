@@ -1,29 +1,22 @@
-"""FastAPI app: serves the static UI and one WebSocket per session."""
+"""FastAPI server for the voffice web UI — one WebSocket per browser tab."""
 
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-# Make examples/ importable as a flat module path (matches pytest.ini pythonpath)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "examples"))
-
-from office_engine import build_office, run_turn  # noqa: E402
+from voffice.engine import build_office, run_turn
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-# Thư mục lưu deliverable: ưu tiên biến môi trường WORKSPACE_DIR, mặc định project_root/workspace
-WORKSPACE_DIR = Path(
-    os.environ.get("WORKSPACE_DIR", PROJECT_ROOT / "workspace")
-).resolve()
+# Where deliverables are written — defaults to ./workspace; override with WORKSPACE_DIR.
+WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", Path.cwd() / "workspace")).resolve()
 
-app = FastAPI()
+app = FastAPI(title="voffice", version="0.1.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -34,7 +27,6 @@ async def index() -> FileResponse:
 
 @app.get("/api/roster")
 async def roster() -> dict:
-    """Used by the page to render sidebar avatars."""
     return {
         "members": [
             {"name": "Manager", "title": "Manager",            "color": "#5865f2"},

@@ -13,7 +13,31 @@
       "Bash(git init *)",
       "Bash(git config *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(pytest *)",
+      "Bash(python3)",
+      "Bash(uvicorn web.server:app --host 127.0.0.1 --port 8000)",
+      "Bash(curl -s -o /dev/null -w \"GET /          → HTTP %{http_code}\\\\n\" http://127.0.0.1:8000/)",
+      "Bash(curl -s http://127.0.0.1:8000/api/roster)",
+      "Bash(curl -s -o /dev/null -w \"GET /static/style.css → HTTP %{http_code}\\\\n\" http://127.0.0.1:8000/static/style.css)",
+      "Bash(curl -s -o /dev/null -w \"GET /static/app.js → HTTP %{http_code}\\\\n\" http://127.0.0.1:8000/static/app.js)",
+      "Bash(kill %1)",
+      "Bash(wait)",
+      "Bash(echo \"--- return code: $? ---\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill *)",
+      "Bash(powershell.exe -Command \"Stop-Process -Id 55480 -Force\")",
+      "Bash(rm -rf workspace_smoke)",
+      "Bash(PYTHONIOENCODING=utf-8 timeout 120 python -c ' *)",
+      "Bash(rm -rf job_cart job_dashboard)",
+      "Bash(PYTHONIOENCODING=utf-8 timeout 300 python -c ' *)",
+      "Bash(rm -rf job_qa_loop)",
+      "Bash(PYTHONIOENCODING=utf-8 timeout 600 python -c ' *)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//tmp/**)",
+      "Bash(rm examples/04_virtual_office_cli.py examples/05_virtual_office_web.py examples/office_engine.py)",
+      "Bash(rm -rf web/)",
+      "Bash(gh auth *)"
     ]
   }
 }
