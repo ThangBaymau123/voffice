@@ -9,12 +9,14 @@ Kiến trúc: 1 Manager + 4 employees ngồi chung MsgHub (auto-broadcast).
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from agentscope.agent import ReActAgent
 from agentscope.formatter import AnthropicMultiAgentFormatter
 from agentscope.memory import InMemoryMemory
-from agentscope.pipeline import MsgHub
+from agentscope.message import Msg
+from agentscope.pipeline import MsgHub, fanout_pipeline
 
 from _common import make_model
 
@@ -100,3 +102,42 @@ def build_office() -> Office:
     employee_names = ["Lan", "Minh", "Hà", "Tú"]
     employees = [_agent_from_role(n, ROLES[n]) for n in employee_names]
     return Office(manager=manager, employees=employees)
+
+
+async def run_turn(office: Office, user_text: str) -> AsyncIterator[TurnEvent]:
+    """One conversation turn.
+
+    1. Broadcast user message into hub (auto-flows into every agent memory).
+    2. Manager speaks.
+    3. Employees speak in parallel via fanout_pipeline.
+    4. Yield TurnEvent for each non-[skip] reply.
+
+    Note: streaming token-by-token is not used here for simplicity — each agent's
+    full reply is yielded as a single chunk with is_final=True. To enable
+    token streaming, replace the manager/employee calls with stream consumers.
+    """
+    participants = [office.manager, *office.employees]
+    user_msg = Msg(name="User", content=user_text, role="user")
+
+    async with MsgHub(participants=participants, enable_auto_broadcast=True) as hub:
+        office.hub = hub
+        await hub.broadcast(user_msg)
+
+        manager_reply = await office.manager(None)
+        if manager_reply.get_text_content().strip() != "[skip]":
+            yield TurnEvent(
+                speaker=office.manager.name,
+                text_chunk=manager_reply.get_text_content(),
+                is_final=True,
+            )
+
+        replies = await fanout_pipeline(office.employees)
+        for reply in replies:
+            text = reply.get_text_content().strip()
+            if text == "[skip]":
+                continue
+            yield TurnEvent(
+                speaker=reply.name,
+                text_chunk=reply.get_text_content(),
+                is_final=True,
+            )
