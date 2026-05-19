@@ -94,7 +94,7 @@ Most multi-agent frameworks output **conversations**. voffice outputs **artifact
 ## Quick start
 
 ```bash
-git clone https://github.com/your-user/voffice
+git clone https://github.com/ThangBaymau123/voffice
 cd voffice
 pip install -e .
 
