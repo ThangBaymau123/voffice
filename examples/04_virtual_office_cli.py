@@ -12,7 +12,7 @@ from pathlib import Path
 
 from colorama import Fore, Style, init as colorama_init
 
-from office_engine import build_office, run_turn
+from office_engine import build_office, run_turn, ship_workspace
 
 colorama_init()
 
@@ -42,7 +42,30 @@ def banner(office) -> None:
         c = COLORS.get(emp.name, Fore.WHITE)
         print(f"  ✓ {c}{emp.name}{Style.RESET_ALL} online (có tool save_deliverable)")
     print(f"{Fore.WHITE}╰──────────────────────────╯{Style.RESET_ALL}")
-    print("Gõ task của bạn (hoặc `exit`):\n")
+    print("Lệnh: gõ task để giao việc, `/ship <tên>` để đóng gói + git commit, `exit` để thoát.\n")
+
+
+def handle_ship(office, raw: str) -> None:
+    name = raw[len("/ship"):].strip()
+    if not name:
+        print(f"{Fore.RED}Dùng: /ship <tên-project>{Style.RESET_ALL}")
+        return
+    if not office.deliverables:
+        print(f"{Fore.RED}Workspace trống — chưa có file nào để ship.{Style.RESET_ALL}")
+        return
+    try:
+        report = ship_workspace(office, name)
+    except Exception as e:  # noqa: BLE001
+        print(f"{Fore.RED}⚠️ Lỗi ship: {e}{Style.RESET_ALL}")
+        return
+    print(f"\n{Fore.GREEN}✓ Đã ship → {report.project_dir}{Style.RESET_ALL}")
+    print(f"  {report.files_copied} file copy, commit {report.commit_sha}")
+    print(f"  Cây file:")
+    for t in report.file_tree[:30]:
+        print(f"    {t}")
+    if len(report.file_tree) > 30:
+        print(f"    ... và {len(report.file_tree) - 30} file nữa")
+    print(f"  Push: cd \"{report.project_dir}\" && git remote add origin <URL> && git push -u origin main\n")
 
 
 def ask_workspace() -> Path:
@@ -74,6 +97,9 @@ async def main() -> None:
             print("Tạm biệt!")
             return
         if not user_text.strip():
+            continue
+        if user_text.strip().startswith("/ship"):
+            handle_ship(office, user_text.strip())
             continue
 
         try:

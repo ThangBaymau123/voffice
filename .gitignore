@@ -4,3 +4,5 @@ __pycache__/
 expenses.json
 .venv/
 workspace/
+projects/
+job_*/
