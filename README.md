@@ -90,6 +90,37 @@ Sau khi hoàn thiện, chạy lại và thử:
 | Workflow phức tạp (rẽ nhánh) | `agentscope.pipeline` các pattern `if_else`, `for_loop` |
 | Đánh giá agent | `agentscope.evaluate` |
 
+## Ví dụ 4 & 5 — Văn phòng ảo
+
+Phòng chat đa-agent: 1 Manager phân việc cho 4 nhân viên (PM, Backend, Frontend, QA).
+Tất cả ở chung "open office" (MsgHub), có thể chen phản biện chéo.
+
+### Cấu hình
+Sao chép `.env.example` → `.env`, điền 5 nhóm key (xem comment trong file).
+
+### Chạy CLI (Ví dụ 4)
+```powershell
+$env:PYTHONIOENCODING="utf-8"
+python examples/04_virtual_office_cli.py
+```
+
+### Chạy Web UI (Ví dụ 5)
+```powershell
+python examples/05_virtual_office_web.py
+```
+Trình duyệt sẽ tự mở http://localhost:8000. UI dark theme, sidebar trái liệt kê
+5 thành viên, feed chính ở giữa, ô nhập ở dưới. Mỗi tab browser là 1 phiên
+văn phòng độc lập (không chia sẻ memory).
+
+### Test thủ công
+Xem `docs/superpowers/specs/2026-05-20-virtual-office-design.md` Section 9
+cho danh sách 10 scenario.
+
+### Test tự động
+```bash
+pytest tests/test_office_engine.py -v
+```
+
 ## Tham khảo
 
 - Docs: <https://doc.agentscope.io>
