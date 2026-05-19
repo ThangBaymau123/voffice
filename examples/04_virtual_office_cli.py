@@ -8,6 +8,7 @@ Thoát: gõ `exit` hoặc Ctrl+C.
 
 import asyncio
 import sys
+from pathlib import Path
 
 from colorama import Fore, Style, init as colorama_init
 
@@ -21,7 +22,10 @@ COLORS = {
     "Minh":    Fore.GREEN,
     "Hà":      Fore.MAGENTA,
     "Tú":      Fore.BLUE,
+    "Office":  Fore.WHITE,
 }
+
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
 
 
 def render(event) -> None:
@@ -32,17 +36,26 @@ def render(event) -> None:
 
 def banner(office) -> None:
     print(f"\n{Fore.WHITE}╭─ Văn phòng đã sẵn sàng ─╮{Style.RESET_ALL}")
+    print(f"  📁 workspace: {office.workspace_dir}")
     print(f"  ✓ {COLORS['Manager']}Manager{Style.RESET_ALL} online")
     for emp in office.employees:
         c = COLORS.get(emp.name, Fore.WHITE)
-        print(f"  ✓ {c}{emp.name}{Style.RESET_ALL} online")
+        print(f"  ✓ {c}{emp.name}{Style.RESET_ALL} online (có tool save_deliverable)")
     print(f"{Fore.WHITE}╰──────────────────────────╯{Style.RESET_ALL}")
     print("Gõ task của bạn (hoặc `exit`):\n")
 
 
+def ask_workspace() -> Path:
+    print(f"{Fore.WHITE}Thư mục lưu deliverable?{Style.RESET_ALL}")
+    print(f"  (Enter để dùng mặc định: {DEFAULT_WORKSPACE})")
+    raw = input("workspace> ").strip()
+    return Path(raw).expanduser().resolve() if raw else DEFAULT_WORKSPACE
+
+
 async def main() -> None:
+    workspace = ask_workspace()
     try:
-        office = build_office()
+        office = build_office(workspace)
     except KeyError as e:
         print(f"Missing env var: {e.args[0]}", file=sys.stderr)
         sys.exit(1)

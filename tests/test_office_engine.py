@@ -72,19 +72,20 @@ def _set_full_env(monkeypatch):
         monkeypatch.setenv(f"{prefix}_BASE_URL", f"https://r{i}.example")
 
 
-def test_build_office_creates_5_agents(monkeypatch):
+def test_build_office_creates_5_agents(monkeypatch, tmp_path):
     _set_full_env(monkeypatch)
-    office = build_office()
+    office = build_office(tmp_path / "ws")
     assert isinstance(office, Office)
     assert office.manager.name == "Manager"
     assert [a.name for a in office.employees] == ["Lan", "Minh", "Hà", "Tú"]
+    assert office.workspace_dir.exists()
 
 
-def test_build_office_missing_env_raises(monkeypatch):
+def test_build_office_missing_env_raises(monkeypatch, tmp_path):
     _set_full_env(monkeypatch)
     monkeypatch.delenv("EMPLOYEE_3_KEY")
     with pytest.raises(KeyError, match="EMPLOYEE_3_KEY"):
-        build_office()
+        build_office(tmp_path / "ws")
 
 
 from unittest.mock import AsyncMock, MagicMock
@@ -93,7 +94,7 @@ from agentscope.message import Msg
 from office_engine import run_turn
 
 
-async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch):
+async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch, tmp_path):
     """Manager + 2 employees speak; 2 employees return [skip] and are filtered."""
     from office_engine import Office
     import office_engine as oe
@@ -125,7 +126,7 @@ async def test_run_turn_yields_events_for_non_skip_replies(monkeypatch):
         make_fake("Hà", ha_call),
         make_fake("Tú", tu_call),
     ]
-    office = Office(manager=manager, employees=employees)
+    office = Office(manager=manager, employees=employees, workspace_dir=tmp_path)
 
     class _StubHub:
         def __init__(self, *a, **kw): pass

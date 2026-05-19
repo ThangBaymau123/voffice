@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -10,11 +11,17 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # Make examples/ importable as a flat module path (matches pytest.ini pythonpath)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from office_engine import build_office, run_turn  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Thư mục lưu deliverable: ưu tiên biến môi trường WORKSPACE_DIR, mặc định project_root/workspace
+WORKSPACE_DIR = Path(
+    os.environ.get("WORKSPACE_DIR", PROJECT_ROOT / "workspace")
+).resolve()
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -43,7 +50,7 @@ async def roster() -> dict:
 async def ws(websocket: WebSocket) -> None:
     await websocket.accept()
     try:
-        office = build_office()
+        office = build_office(WORKSPACE_DIR)
     except KeyError as e:
         await websocket.send_json({"error": f"Missing env var: {e.args[0]}"})
         await websocket.close()

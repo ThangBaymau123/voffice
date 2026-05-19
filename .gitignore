@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 expenses.json
 .venv/
+workspace/
