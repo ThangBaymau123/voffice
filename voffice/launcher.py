@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import webbrowser
+from pathlib import Path
+
+# Direct invocation (`python voffice/launcher.py`) means uvicorn's
+# `voffice.server:app` import string won't resolve unless we put the
+# project root on sys.path first.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import uvicorn
 

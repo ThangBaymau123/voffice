@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+# Direct invocation (`python voffice/server.py`) needs project root on sys.path
+# before the `voffice.engine` import below resolves.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -66,3 +72,11 @@ async def ws(websocket: WebSocket) -> None:
                 await websocket.send_json({"error": str(e)})
     except WebSocketDisconnect:
         return
+
+
+if __name__ == "__main__":
+    # Convenience: `python voffice/server.py` launches via the same helper
+    # the CLI uses (`voffice web`), so users get a running server + opened
+    # browser without remembering the uvicorn invocation.
+    from voffice.launcher import run_web
+    run_web()
